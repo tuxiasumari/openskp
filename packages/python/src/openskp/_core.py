@@ -21,9 +21,10 @@ from typing import Any, Dict
 import xml.etree.ElementTree as ET
 
 import numpy as np
-import trimesh
-from shapely.geometry import Polygon, Point, MultiPoint
-import shapely.ops
+
+# trimesh and shapely are needed only by the triangulation / GLB-export
+# paths (triangulate_face_3d, build_scene) — imported lazily there so that
+# pure parsing (SkpFile.parse) works without them installed.
 
 from .errors import SkpParseError
 
@@ -144,6 +145,8 @@ def iter_top_level_lazy(data, start, end, container_tags=None):
 # ── 3D planar triangulation ──────────────────────────────────────────────
 
 def triangulate_face_3d(vertices_3d, loops, normal):
+    from shapely.geometry import Polygon, Point, MultiPoint
+    import shapely.ops
     if len(loops) == 1 and len(loops[0]) == 3:
         return [loops[0]]
     if len(loops) == 1 and len(loops[0]) == 4:
@@ -900,6 +903,8 @@ def build_scene(parsed: Dict[str, Any], output_dir: str, filename_stem: str) -> 
     Returns:
         Dict with glb_path, json_path, metadata, mesh_count
     """
+    import trimesh
+
     defs_dict = parsed['defs_dict']
     layer_colors = parsed['layer_colors']
     layer_id_to_name = parsed['layer_id_to_name']
