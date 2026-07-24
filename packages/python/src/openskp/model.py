@@ -122,6 +122,12 @@ class Face:
             ``u = (p·xr)/tile_w``, ``v = (p·yr)/tile_h``.  Distorted
             (4-pin) mappings are projective: ``uvq[2]`` ≠ 1.
         uv_transform_back: Same for the face's back side, or ``None``.
+        uv_projected: The texture is PROJECTED (e.g. the Add Location
+            terrain drape): its UVs run in the projection plane's frame,
+            not the face frame.
+        uv_projected_back: Same for the face's back side.
+        layer: Name of the layer (tag) the face carries, or ``""`` when it
+            sits on the model's default layer.
     """
 
     id: int
@@ -131,6 +137,9 @@ class Face:
     back_material_id: Optional[int] = None
     uv_transform: Optional[Tuple[float, ...]] = None
     uv_transform_back: Optional[Tuple[float, ...]] = None
+    uv_projected: bool = False
+    uv_projected_back: bool = False
+    layer: str = ""
 
 
 # ── Layers & Materials ────────────────────────────────────────────────────
@@ -145,12 +154,18 @@ class Layer:
         color_r: Red channel (0–255).
         color_g: Green channel (0–255).
         color_b: Blue channel (0–255).
+        visible: ``False`` when the layer is hidden in the model.
+        default: ``True`` for the model's default layer (the first one in
+            the file — "Layer0" / "Untagged"), which every unlabelled
+            entity implicitly sits on.
     """
 
     name: str
     color_r: int = 200
     color_g: int = 200
     color_b: int = 200
+    visible: bool = True
+    default: bool = False
 
 
 @dataclass
@@ -430,6 +445,18 @@ class SkpFile:
         model = SkpModel()
         model.version = parsed.get("version", "unknown")
 
+        # Layer (tag) join: entity records carry a numeric layer id; the
+        # model's default layer resolves to "" (an unlabelled entity).
+        lid2name = parsed.get("layer_id_to_name") or {}
+        raw_layers = parsed.get("layers") or []
+        default_layer_names = {"Layer0", "Untagged"}
+        if raw_layers:
+            default_layer_names.add(raw_layers[0]["name"])
+
+        def _layer_name(lid):
+            name = lid2name.get(lid, "") if lid is not None else ""
+            return "" if name in default_layer_names else name
+
         # Convert defs_dict to Definition dataclasses
         for def_id, d in parsed["defs_dict"].items():
             builder = d["builder"]
@@ -461,6 +488,9 @@ class SkpFile:
                     back_material_id=f_data.get("back_material_id"),
                     uv_transform=f_data.get("uv_transform"),
                     uv_transform_back=f_data.get("uv_transform_back"),
+                    uv_projected=f_data.get("uv_projected", False),
+                    uv_projected_back=f_data.get("uv_projected_back", False),
+                    layer=_layer_name(f_data.get("layer_id")),
                 )
             # Populate instances
             for inst in builder.instances:
@@ -470,15 +500,28 @@ class SkpFile:
                     guid=inst.get("ref_guid", ""),
                     matrix=inst.get("matrix", []),
                     material_id=inst.get("material_id"),
+                    layer=_layer_name(inst.get("layer_id")),
                 ))
             if def_id == "ROOT":
                 model.root = defn
             else:
                 model.definitions[def_id] = defn
 
-        # Convert layers
-        for name, (r, g, b) in parsed["layer_colors"].items():
-            model.layers.append(Layer(name=name, color_r=r, color_g=g, color_b=b))
+        # Convert layers — file order when the layer records were parsed
+        # (first = the model's default layer, hidden flag honoured), the
+        # colour-only join otherwise.
+        colors = parsed["layer_colors"]
+        if raw_layers:
+            for i, entry in enumerate(raw_layers):
+                r, g, b = colors.get(entry["name"], (200, 200, 200))
+                model.layers.append(Layer(
+                    name=entry["name"], color_r=r, color_g=g, color_b=b,
+                    visible=not entry.get("hidden", False), default=(i == 0)))
+        else:
+            for name, (r, g, b) in colors.items():
+                model.layers.append(Layer(
+                    name=name, color_r=r, color_g=g, color_b=b,
+                    default=(name in default_layer_names)))
 
         # Convert materials
         mat_for_data: Dict[int, Material] = {}   # id(raw dict) -> Material

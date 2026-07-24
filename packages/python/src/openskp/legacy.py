@@ -795,7 +795,8 @@ def _fill_builder(builder, ents, slots):
                 loops.append(loop)
             face = {'loops': loops, 'normal': tuple(v['plane'][:3]),
                     'material_id': v['db']['mat'] or None,
-                    'back_material_id': v['back_mat'] or None}
+                    'back_material_id': v['back_mat'] or None,
+                    'layer_id': v['db']['layer'] or None}
             attrs = v.get('attrs')
             if isinstance(attrs, dict):
                 for cn, cv in attrs.get('children', []):
@@ -887,13 +888,16 @@ def full_parse_legacy(skp_path: str) -> Dict[str, Any]:
         mats[v['name']] = mat_obj
         material_id_to_name[s] = v['name']
 
-    # layers
+    # layers (in file order — the first entry is the model's default layer)
     layer_colors = {}
     layer_id_to_name = {}
+    layer_entries = []
     for s, v in layers:
         rgba = v.get('rgba', (136, 136, 136, 255))
         layer_colors[v['name']] = (rgba[0], rgba[1], rgba[2])
         layer_id_to_name[s] = v['name']
+        layer_entries.append({'id': s, 'name': v['name'],
+                              'hidden': bool(v.get('hidden'))})
     if 'Layer0' not in layer_colors:
         layer_colors['Layer0'] = (136, 136, 136)
 
@@ -933,6 +937,7 @@ def full_parse_legacy(skp_path: str) -> Dict[str, Any]:
         'version': version,
         'layer_colors': layer_colors,
         'layer_id_to_name': layer_id_to_name,
+        'layers': layer_entries,
         'material_id_to_name': material_id_to_name,
         'materials': mats,
         'materials_by_folder': {},

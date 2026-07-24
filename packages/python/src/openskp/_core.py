@@ -244,6 +244,16 @@ def find_child_tag(nodes, target):
             return res
     return None
 
+def _entity_layer_id(d007):
+    """The layer (tag) id an entity's D007 attribute block carries in its
+    D207 child, or ``None`` when the entity sits on the default layer."""
+    d207 = next((c for c in d007['children'] if c['tag'] == 'D207'), None)
+    if d207 is None or not d207['payload']:
+        return None
+    p = d207['payload']
+    return p[0] if len(p) == 1 else parse_var_int(p, 0, len(p))
+
+
 def find_all_nodes_rec(nodes, target_tag, results):
     for n in nodes:
         if n['tag'] == target_tag:
@@ -397,12 +407,14 @@ def _extract_geometry_from_nodes(elements, builder):
                         if co_edges:
                             loops.append(co_edges)
                 face_mat_id = None
+                face_layer_id = None
                 uv_front = uv_back = None
                 d007 = next((c for c in el['children'] if c['tag'] == 'D007'), None)
                 if d007:
                     d107 = next((c for c in d007['children'] if c['tag'] == 'D107'), None)
                     if d107:
                         face_mat_id = parse_var_int(d107['payload'], 0, len(d107['payload']))
+                    face_layer_id = _entity_layer_id(d007)
                     dc05 = next((c for c in d007['children'] if c['tag'] == 'DC05'), None)
                     if dc05 is not None:
                         uv_front, uv_back = _extract_uv_transforms(dc05['payload'])
@@ -417,6 +429,7 @@ def _extract_geometry_from_nodes(elements, builder):
                 builder.faces[f_id] = {'loops': loops, 'normal': normal,
                                        'material_id': face_mat_id,
                                        'back_material_id': back_mat_id,
+                                       'layer_id': face_layer_id,
                                        'uv_transform': uv_front,
                                        'uv_transform_back': uv_back}
 
@@ -444,7 +457,9 @@ def _extract_geometry_from_nodes(elements, builder):
             # same D007/D107 structure faces use. Faces whose own material
             # is None inherit this — the SDK resolves that inheritance when
             # exporting, so consumers need the raw value to do the same.
+            # The sibling D207 holds the instance's layer (tag) id.
             inst_mat_id = None
+            inst_layer_id = None
             d007 = next((c for c in el['children'] if c['tag'] == 'D007'),
                         None)
             if d007:
@@ -453,6 +468,7 @@ def _extract_geometry_from_nodes(elements, builder):
                 if d107:
                     inst_mat_id = parse_var_int(
                         d107['payload'], 0, len(d107['payload']))
+                inst_layer_id = _entity_layer_id(d007)
 
             builder.instances.append({
                 'offset': el['offset'],
@@ -461,6 +477,7 @@ def _extract_geometry_from_nodes(elements, builder):
                 'name': name,
                 'matrix': matrix,
                 'material_id': inst_mat_id,
+                'layer_id': inst_layer_id,
                 'children': el['children']
             })
 
@@ -766,8 +783,11 @@ def full_parse(skp_path: str) -> Dict[str, Any]:
     # the (comparatively modest, ~1x) cost of decompressing model.dat
     # itself. See iter_top_level_lazy() for the mechanics.
 
-    # Layer ID -> name
+    # Layer ID -> name (+ per-layer hidden flag, in file order — the first
+    # entry is the model's default layer). 8C3C children: DC05 = id, 8D3C =
+    # name, 8E3C = one byte, 01 when the layer is hidden.
     layer_id_to_name = {}
+    layer_entries = []
     def collect_layers(nodes):
         for el in nodes:
             if el['tag'] == '993A':
@@ -784,6 +804,13 @@ def full_parse(skp_path: str) -> Dict[str, Any]:
                                 l_id = parse_var_int(payload, 0, len(payload))
                             l_name = name_node['payload'].decode('utf-8', errors='replace')
                             layer_id_to_name[l_id] = l_name
+                            hidden_node = next(
+                                (c for c in child['children']
+                                 if c['tag'] == '8E3C'), None)
+                            hidden = bool(hidden_node and hidden_node['payload']
+                                          and hidden_node['payload'][0] == 1)
+                            layer_entries.append({'id': l_id, 'name': l_name,
+                                                  'hidden': hidden})
             collect_layers(el['children'])
 
     # Material ID -> name
@@ -883,6 +910,7 @@ def full_parse(skp_path: str) -> Dict[str, Any]:
         'version': version,
         'layer_colors': layer_colors,
         'layer_id_to_name': layer_id_to_name,
+        'layers': layer_entries,
         'material_id_to_name': material_id_to_name,
         'materials': materials,
         'materials_by_folder': materials_by_folder,
