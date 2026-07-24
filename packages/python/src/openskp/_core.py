@@ -244,6 +244,110 @@ def find_child_tag(nodes, target):
             return res
     return None
 
+def _tlv_items(buf):
+    """Parse ``buf`` as a flat run of (u16 tag, u32 len, payload) records
+    covering the whole buffer, or ``None`` when it doesn't fit — the page
+    (scene) container nests plain TLV runs inside leaf payloads."""
+    items = []
+    off = 0
+    n = len(buf)
+    while off < n:
+        if off + 6 > n:
+            return None
+        tag = struct.unpack_from('<H', buf, off)[0]
+        ln = struct.unpack_from('<I', buf, off + 2)[0]
+        if tag == 0 or off + 6 + ln > n:
+            return None
+        items.append((tag, buf[off + 6:off + 6 + ln]))
+        off += 6 + ln
+    return items
+
+
+def _parse_pages(elements):
+    """Scenes ("pages"). The 0702 node's payload nests 6D60 > 6D61 > one
+    7148 record per page:
+
+    * 6F54 > 6F55 — page name (UTF-8)
+    * 714A > 34BC — camera: 34BD eye, 34BE target, 34BF up (3×f64, inches),
+      34C4 field of view (degrees), 34C2 u8 = PERSPECTIVE flag (00 =
+      parallel projection — calibrated against the bundled scene
+      thumbnails: parallel plans/elevations carry 00 and their 34C3
+      visible height matches the thumbnail framing exactly, while
+      perspective scenes carry 01 with a stale 34C3),
+      34C3 f64 = visible height when parallel (inches)
+    * 7150 — layers hidden in this page: (u8 length, var-int layer id) runs
+    """
+    def find_0702(nodes):
+        for el in nodes:
+            if el['tag'] == '0702':
+                return el
+            r = find_0702(el['children'])
+            if r is not None:
+                return r
+        return None
+
+    node = find_0702(elements)
+    if node is None:
+        return []
+
+    def sub(items, tag):
+        for t, p in items or []:
+            if t == tag:
+                return p
+        return None
+
+    def vec3(p):
+        return struct.unpack('<3d', p) if p is not None and len(p) == 24 \
+            else None
+
+    pages = []
+    for t60, p60 in _tlv_items(node['payload']) or []:
+        if t60 != 0x6D60:
+            continue
+        for t61, p61 in _tlv_items(p60) or []:
+            if t61 != 0x6D61:
+                continue
+            for t48, p48 in _tlv_items(p61) or []:
+                if t48 != 0x7148:
+                    continue
+                items = _tlv_items(p48)
+                if items is None:
+                    continue
+                page = {'name': '', 'eye': None, 'target': None, 'up': None,
+                        'fov': 35.0, 'parallel': False, 'ortho_height': 0.0,
+                        'hidden_layer_ids': []}
+                head = _tlv_items(sub(items, 0x6F54))
+                name = sub(head, 0x6F55)
+                if name:
+                    page['name'] = name.decode('utf-8', errors='replace')
+                cam_wrap = _tlv_items(sub(items, 0x714A))
+                cam = _tlv_items(sub(cam_wrap, 0x34BC)) if cam_wrap else None
+                if cam:
+                    page['eye'] = vec3(sub(cam, 0x34BD))
+                    page['target'] = vec3(sub(cam, 0x34BE))
+                    page['up'] = vec3(sub(cam, 0x34BF))
+                    fov = sub(cam, 0x34C4)
+                    if fov is not None and len(fov) == 8:
+                        page['fov'] = struct.unpack('<d', fov)[0]
+                    flag = sub(cam, 0x34C2)
+                    page['parallel'] = bool(flag) and flag[0] == 0
+                    height = sub(cam, 0x34C3)
+                    if height is not None and len(height) == 8:
+                        page['ortho_height'] = struct.unpack('<d', height)[0]
+                hidden = sub(items, 0x7150)
+                off = 0
+                while hidden and off + 1 <= len(hidden):
+                    ln = hidden[off]
+                    if ln == 0 or off + 1 + ln > len(hidden):
+                        break
+                    page['hidden_layer_ids'].append(
+                        parse_var_int(hidden, off + 1, ln))
+                    off += 1 + ln
+                if page['eye'] is not None and page['target'] is not None:
+                    pages.append(page)
+    return pages
+
+
 def _entity_layer_id(d007):
     """The layer (tag) id an entity's D007 attribute block carries in its
     D207 child, or ``None`` when the entity sits on the default layer."""
@@ -911,6 +1015,7 @@ def full_parse(skp_path: str) -> Dict[str, Any]:
         'layer_colors': layer_colors,
         'layer_id_to_name': layer_id_to_name,
         'layers': layer_entries,
+        'pages': _parse_pages(elements),
         'material_id_to_name': material_id_to_name,
         'materials': materials,
         'materials_by_folder': materials_by_folder,

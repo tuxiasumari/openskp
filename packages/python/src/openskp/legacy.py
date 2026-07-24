@@ -938,6 +938,9 @@ def full_parse_legacy(skp_path: str) -> Dict[str, Any]:
         'layer_colors': layer_colors,
         'layer_id_to_name': layer_id_to_name,
         'layers': layer_entries,
+        # CPage records are not walked yet (no repro file with legacy
+        # scenes on hand) — scenes import as none for classic files.
+        'pages': [],
         'material_id_to_name': material_id_to_name,
         'materials': mats,
         'materials_by_folder': {},

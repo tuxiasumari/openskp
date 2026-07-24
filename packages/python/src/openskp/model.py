@@ -187,6 +187,32 @@ class Style:
 
 
 @dataclass
+class Page:
+    """A saved scene (SketchUp's "Scenes" tabs; "pages" in the SDK).
+
+    Attributes:
+        name: Scene name as shown on its tab.
+        eye: Camera position ``(x, y, z)`` in inches, or ``None``.
+        target: Point the camera looks at, in inches.
+        up: Camera up vector.
+        fov: Field of view in degrees (SketchUp default 35).
+        parallel: ``True`` when the scene uses parallel (orthographic)
+            projection; ``fov`` still holds the stored perspective angle.
+        ortho_height: Visible height in inches when ``parallel``.
+        hidden_layers: Names of the layers this scene hides.
+    """
+
+    name: str = ""
+    eye: Optional[Tuple[float, float, float]] = None
+    target: Optional[Tuple[float, float, float]] = None
+    up: Optional[Tuple[float, float, float]] = None
+    fov: float = 35.0
+    parallel: bool = False
+    ortho_height: float = 0.0
+    hidden_layers: List[str] = field(default_factory=list)
+
+
+@dataclass
 class Texture:
     """A material's texture image, extracted from the SKP container.
 
@@ -349,6 +375,7 @@ class SkpModel:
             are geometry drawn directly at the top level. Corresponds to
             TypeScript/.NET/Dart/C++'s ``root``/``Root``.
         layers: List of :class:`Layer` objects found in the file.
+        pages: List of :class:`Page` objects — the file's saved scenes.
         materials: List of :class:`Material` objects found in the file.
         materials_by_id: Mapping of TLV material ID → :class:`Material`,
             the join table for :attr:`Face.material_id`.  Several IDs may
@@ -367,6 +394,7 @@ class SkpModel:
     definitions: Dict[int, Definition] = field(default_factory=dict)
     root: Definition = field(default_factory=Definition)
     layers: List[Layer] = field(default_factory=list)
+    pages: List[Page] = field(default_factory=list)
     materials: List[Material] = field(default_factory=list)
     materials_by_id: Dict[int, Material] = field(default_factory=dict)
     styles: List[Style] = field(default_factory=list)
@@ -522,6 +550,22 @@ class SkpFile:
                 model.layers.append(Layer(
                     name=name, color_r=r, color_g=g, color_b=b,
                     default=(name in default_layer_names)))
+
+        # Convert pages (saved scenes) — hidden layer ids resolve to names;
+        # unknown ids (stale refs) are dropped.
+        for pg in parsed.get("pages") or []:
+            model.pages.append(Page(
+                name=pg.get("name", ""),
+                eye=pg.get("eye"),
+                target=pg.get("target"),
+                up=pg.get("up"),
+                fov=pg.get("fov", 35.0),
+                parallel=pg.get("parallel", False),
+                ortho_height=pg.get("ortho_height", 0.0),
+                hidden_layers=[lid2name[i]
+                               for i in pg.get("hidden_layer_ids", [])
+                               if i in lid2name],
+            ))
 
         # Convert materials
         mat_for_data: Dict[int, Material] = {}   # id(raw dict) -> Material
