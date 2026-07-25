@@ -213,6 +213,29 @@ class Page:
 
 
 @dataclass
+class Dimension:
+    """A linear dimension (SketchUp's Dimension tool).
+
+    Attributes:
+        a: First measured point ``(x, y, z)`` in inches.
+        b: Second measured point.
+        offset: Offset distance (inches) — how far the dimension line sits
+            from the ``a``–``b`` segment, along the in-plane perpendicular.
+        plane_x: The dimension plane's x-axis, or ``None``.
+        normal: The dimension plane's normal, or ``None``.
+        text: The displayed text. Empty when the dimension shows its
+            auto-computed measured value (the caller formats ``|b − a|``).
+    """
+
+    a: Tuple[float, float, float]
+    b: Tuple[float, float, float]
+    offset: float = 0.0
+    plane_x: Optional[Tuple[float, float, float]] = None
+    normal: Optional[Tuple[float, float, float]] = None
+    text: str = ""
+
+
+@dataclass
 class Texture:
     """A material's texture image, extracted from the SKP container.
 
@@ -376,6 +399,7 @@ class SkpModel:
             TypeScript/.NET/Dart/C++'s ``root``/``Root``.
         layers: List of :class:`Layer` objects found in the file.
         pages: List of :class:`Page` objects — the file's saved scenes.
+        dimensions: List of :class:`Dimension` objects (linear dimensions).
         materials: List of :class:`Material` objects found in the file.
         materials_by_id: Mapping of TLV material ID → :class:`Material`,
             the join table for :attr:`Face.material_id`.  Several IDs may
@@ -395,6 +419,7 @@ class SkpModel:
     root: Definition = field(default_factory=Definition)
     layers: List[Layer] = field(default_factory=list)
     pages: List[Page] = field(default_factory=list)
+    dimensions: List[Dimension] = field(default_factory=list)
     materials: List[Material] = field(default_factory=list)
     materials_by_id: Dict[int, Material] = field(default_factory=dict)
     styles: List[Style] = field(default_factory=list)
@@ -565,6 +590,15 @@ class SkpFile:
                 hidden_layers=[lid2name[i]
                                for i in pg.get("hidden_layer_ids", [])
                                if i in lid2name],
+            ))
+
+        # Convert dimensions (linear).
+        for dm in parsed.get("dimensions") or []:
+            model.dimensions.append(Dimension(
+                a=tuple(dm["a"]), b=tuple(dm["b"]),
+                offset=dm.get("offset", 0.0),
+                plane_x=dm.get("plane_x"), normal=dm.get("normal"),
+                text=dm.get("text", ""),
             ))
 
         # Convert materials

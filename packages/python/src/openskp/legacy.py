@@ -941,6 +941,7 @@ def full_parse_legacy(skp_path: str) -> Dict[str, Any]:
         # CPage records are not walked yet (no repro file with legacy
         # scenes on hand) — scenes import as none for classic files.
         'pages': [],
+        'dimensions': [],
         'material_id_to_name': material_id_to_name,
         'materials': mats,
         'materials_by_folder': {},

@@ -263,6 +263,169 @@ def _tlv_items(buf):
     return items
 
 
+def _tlv_find(items, tag):
+    """First payload with ``tag`` in a ``_tlv_items`` list, or ``None``."""
+    for t, p in items or ():
+        if t == tag:
+            return p
+    return None
+
+
+def _build_vertex_positions(elements):
+    """Map every vertex's persistent id (hex) → ``(x, y, z)`` inches.
+
+    A vertex is a ``C409`` record: ``DC05`` holds its persistent id (the
+    ``DE05`` var-int payload), ``C509`` its 3×f64 position. Dimension
+    connection points reference geometry by this id (see
+    :func:`_parse_dimensions`). Ids are unique file-wide, so a single flat map
+    resolves a reference to the exact vertex regardless of which context holds
+    it — model-root dimensions reference model-root vertices (world space)."""
+    id2pos = {}
+
+    def walk(nodes):
+        for el in nodes:
+            if el['tag'] == 'C409':
+                dc05 = find_child_tag(el['children'], 'DC05')
+                c509 = find_child_tag(el['children'], 'C509')
+                if dc05 and c509 and len(c509['payload']) == 24:
+                    p = dc05['payload']
+                    if p[:2] == b'\xde\x05':
+                        idlen = read_u32(p, 2)
+                        idb = p[6:6 + idlen]
+                    else:
+                        idb = p
+                    id2pos[idb.hex()] = struct.unpack('<3d', c509['payload'])
+            if el['children']:
+                walk(el['children'])
+
+    walk(elements)
+    return id2pos
+
+
+def _build_instance_world_transforms(elements):
+    """Map each instance's persistent id (hex) → its WORLD transform (a
+    13-float matrix), by walking the instance tree from the root and composing
+    parent × local at every ``6419``.
+
+    A dimension connects to geometry INSIDE a placed component; its connection
+    reference names the vertex AND the instance holding it (see
+    :func:`_parse_dimensions`). The vertex position is definition-local, so it
+    must be lifted to world by the instance's transform for the dimension to
+    land where the author drew it."""
+    world = {}
+
+    def walk(nodes, parent):
+        for el in nodes:
+            if el['tag'] == '6419':
+                d007 = find_child_tag(el['children'], 'D007')
+                dc05 = find_child_tag(d007['children'], 'DC05') if d007 else None
+                iid = None
+                if dc05:
+                    p = dc05['payload']
+                    idb = p[6:6 + read_u32(p, 2)] if p[:2] == b'\xde\x05' else p
+                    iid = idb.hex()
+                m = find_child_tag(el['children'], '6619')
+                mat = list(struct.unpack('<13d', m['payload'])) \
+                    if m and len(m['payload']) == 104 else None
+                here = multiply_matrices(parent, mat) if mat else parent
+                if iid:
+                    world[iid] = here
+                walk(el['children'], here)
+            elif el['children']:
+                walk(el['children'], parent)
+
+    walk(elements, None)
+    return world
+
+
+def _parse_dimensions(model_dat, id2pos, inst_world):
+    """Linear dimensions (SketchUp's Dimension tool).
+
+    A dimension entity is a ``5BCC`` record (raw bytes ``cc 5b``) holding:
+
+    * ``5BCD`` / ``5BCE`` — the two connection points. Each wraps a ``5208``
+      whose ``5209`` is the connection TYPE (1 = a free explicit point in
+      ``520A``, already world space; 2 = connected to geometry, ``520A`` is
+      zero and ``520B → 53FC`` names the target: ``53FD`` = the vertex by
+      persistent id, ``53FE`` = a length-prefixed persistent id of the
+      INSTANCE holding it — the vertex position is definition-local, so it is
+      lifted to world by that instance's transform).
+    * ``5BCF`` — the dimension plane's x-axis; ``5BD0`` — its normal.
+    * ``5BD2`` — the offset distance (inches): how far the dimension line sits
+      from the measured segment, along the in-plane perpendicular.
+
+    The measured value is auto-computed from the two points (no cached text on
+    the samples seen), so callers format it themselves. Endpoints come out in
+    WORLD space (inches). A connection point that cannot be resolved drops the
+    whole dimension (fail-safe)."""
+    dims = []
+    i = 0
+    n = len(model_dat)
+    while True:
+        j = model_dat.find(b'\xcc\x5b', i)
+        if j < 0:
+            break
+        i = j + 1
+        if j + 6 > n:
+            continue
+        ln = struct.unpack_from('<I', model_dat, j + 2)[0]
+        if ln < 40 or j + 6 + ln > n:
+            continue
+        body = _tlv_items(model_dat[j + 6:j + 6 + ln])
+        if body is None:
+            continue
+        tags = [t for t, _ in body]
+        if 0x5BCD not in tags or 0x5BCE not in tags:
+            continue
+
+        def _point(block_payload):
+            blk = _tlv_find(_tlv_items(block_payload) or [], 0x5208)
+            if blk is None:
+                return None
+            sub = _tlv_items(blk) or []
+            typ = _tlv_find(sub, 0x5209)
+            typ = struct.unpack('<I', typ)[0] if typ and len(typ) == 4 else None
+            if typ == 1:
+                pos = _tlv_find(sub, 0x520A)
+                return struct.unpack('<3d', pos) if pos and len(pos) == 24 \
+                    else None
+            # type 2: resolve the geometry reference (vertex + instance).
+            ref = _tlv_find(sub, 0x520B)
+            f53fc = _tlv_find(_tlv_items(ref) or [], 0x53FC) if ref else None
+            fi = _tlv_items(f53fc) or [] if f53fc else []
+            vid = _tlv_find(fi, 0x53FD)
+            iid = _tlv_find(fi, 0x53FE)
+            if not vid:
+                return None
+            local = id2pos.get(vid.hex())
+            if local is None:
+                return None
+            if iid and len(iid) >= 1 and iid[0] > 0 \
+                    and 1 + iid[0] <= len(iid):
+                w = inst_world.get(iid[1:1 + iid[0]].hex())
+                if w:
+                    return transform_point(local, w)
+            return local           # model-root vertex — already world
+
+        a = _point(_tlv_find(body, 0x5BCD))
+        b = _point(_tlv_find(body, 0x5BCE))
+        if a is None or b is None:
+            continue
+        xaxis = _tlv_find(body, 0x5BCF)
+        normal = _tlv_find(body, 0x5BD0)
+        off = _tlv_find(body, 0x5BD2)
+        dims.append({
+            'a': a, 'b': b,
+            'plane_x': struct.unpack('<3d', xaxis)
+            if xaxis and len(xaxis) == 24 else None,
+            'normal': struct.unpack('<3d', normal)
+            if normal and len(normal) == 24 else None,
+            'offset': struct.unpack('<d', off)[0]
+            if off and len(off) == 8 else 0.0,
+        })
+    return dims
+
+
 def _parse_pages(elements):
     """Scenes ("pages"). The 0702 node's payload nests 6D60 > 6D61 > one
     7148 record per page:
@@ -1016,6 +1179,9 @@ def full_parse(skp_path: str) -> Dict[str, Any]:
         'layer_id_to_name': layer_id_to_name,
         'layers': layer_entries,
         'pages': _parse_pages(elements),
+        'dimensions': _parse_dimensions(
+            model_dat, _build_vertex_positions(elements),
+            _build_instance_world_transforms(elements)),
         'material_id_to_name': material_id_to_name,
         'materials': materials,
         'materials_by_folder': materials_by_folder,
