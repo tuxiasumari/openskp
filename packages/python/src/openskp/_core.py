@@ -271,16 +271,17 @@ def _tlv_find(items, tag):
     return None
 
 
-def _build_vertex_positions(elements):
-    """Map every vertex's persistent id (hex) → ``(x, y, z)`` inches.
+def _scan_vertex_positions(top, id2pos):
+    """Accumulate every vertex's persistent id (hex) → ``(x, y, z)`` inches.
 
     A vertex is a ``C409`` record: ``DC05`` holds its persistent id (the
     ``DE05`` var-int payload), ``C509`` its 3×f64 position. Dimension
     connection points reference geometry by this id (see
     :func:`_parse_dimensions`). Ids are unique file-wide, so a single flat map
     resolves a reference to the exact vertex regardless of which context holds
-    it — model-root dimensions reference model-root vertices (world space)."""
-    id2pos = {}
+    it — model-root dimensions reference model-root vertices (world space).
+    Called once per top-level record: full_parse streams the TLV tree and
+    never holds it whole."""
 
     def walk(nodes):
         for el in nodes:
@@ -298,21 +299,21 @@ def _build_vertex_positions(elements):
             if el['children']:
                 walk(el['children'])
 
-    walk(elements)
-    return id2pos
+    walk([top])
 
 
-def _build_instance_world_transforms(elements):
-    """Map each instance's persistent id (hex) → its WORLD transform (a
-    13-float matrix), by walking the instance tree from the root and composing
-    parent × local at every ``6419``.
+def _scan_instance_transforms(top, world):
+    """Accumulate each instance's persistent id (hex) → its WORLD transform
+    (a 13-float matrix), walking the instance tree and composing
+    parent × local at every ``6419``.  Per top-level record, like
+    :func:`_scan_vertex_positions` — an instance chain never crosses
+    top-level records.
 
     A dimension connects to geometry INSIDE a placed component; its connection
     reference names the vertex AND the instance holding it (see
     :func:`_parse_dimensions`). The vertex position is definition-local, so it
     must be lifted to world by the instance's transform for the dimension to
     land where the author drew it."""
-    world = {}
 
     def walk(nodes, parent):
         for el in nodes:
@@ -334,8 +335,7 @@ def _build_instance_world_transforms(elements):
             elif el['children']:
                 walk(el['children'], parent)
 
-    walk(elements, None)
-    return world
+    walk([top], None)
 
 
 def _parse_dimensions(model_dat, id2pos, inst_world):
@@ -426,7 +426,23 @@ def _parse_dimensions(model_dat, id2pos, inst_world):
     return dims
 
 
-def _parse_pages(elements):
+def _find_page_node(top):
+    """Return the ``0702`` scenes node inside *top*'s subtree, or ``None``.
+
+    Called per top-level record; retaining the (small) 0702 subtree is the
+    only thing kept alive past the streaming loop."""
+    def find(nodes):
+        for el in nodes:
+            if el['tag'] == '0702':
+                return el
+            r = find(el['children'])
+            if r is not None:
+                return r
+        return None
+    return find([top])
+
+
+def _parse_pages(node):
     """Scenes ("pages"). The 0702 node's payload nests 6D60 > 6D61 > one
     7148 record per page:
 
@@ -440,16 +456,6 @@ def _parse_pages(elements):
       34C3 f64 = visible height when parallel (inches)
     * 7150 — layers hidden in this page: (u8 length, var-int layer id) runs
     """
-    def find_0702(nodes):
-        for el in nodes:
-            if el['tag'] == '0702':
-                return el
-            r = find_0702(el['children'])
-            if r is not None:
-                return r
-        return None
-
-    node = find_0702(elements)
     if node is None:
         return []
 
@@ -1142,12 +1148,19 @@ def full_parse(skp_path: str) -> Dict[str, Any]:
             collect_defs(el['children'])
 
     root_builder = _GeometryBuilder()
+    vertex_positions: Dict[str, Tuple[float, float, float]] = {}
+    instance_world: Dict[str, list] = {}
+    page_node = None
 
     for index, total, el in iter_top_level_lazy(model_dat, 0, len(model_dat), CONTAINER_TAGS):
         try:
             collect_layers([el])
             collect_material_ids([el])
             collect_defs([el])
+            _scan_vertex_positions(el, vertex_positions)
+            _scan_instance_transforms(el, instance_world)
+            if page_node is None:
+                page_node = _find_page_node(el)
             if el['tag'] == 'F601':
                 _extract_geometry_from_nodes(el['children'], root_builder)
         except Exception as e:
@@ -1178,10 +1191,9 @@ def full_parse(skp_path: str) -> Dict[str, Any]:
         'layer_colors': layer_colors,
         'layer_id_to_name': layer_id_to_name,
         'layers': layer_entries,
-        'pages': _parse_pages(elements),
+        'pages': _parse_pages(page_node),
         'dimensions': _parse_dimensions(
-            model_dat, _build_vertex_positions(elements),
-            _build_instance_world_transforms(elements)),
+            model_dat, vertex_positions, instance_world),
         'material_id_to_name': material_id_to_name,
         'materials': materials,
         'materials_by_folder': materials_by_folder,
